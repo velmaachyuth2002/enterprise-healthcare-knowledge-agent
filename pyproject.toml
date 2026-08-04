@@ -7,8 +7,10 @@ authors = [
 ]
 requires-python = ">=3.12,<3.13"
 dependencies = [
+    "fastapi>=0.141.1",
     "langgraph>=1.2.10",
     "pydantic>=2.13.4",
+    "uvicorn[standard]>=0.52.1",
 ]
 
 # Application, not a published library — no build backend needed, just an
@@ -18,5 +20,6 @@ package = false
 
 [dependency-groups]
 dev = [
+    "httpx2>=2.9.1",
     "pytest>=9.1.1",
 ]
