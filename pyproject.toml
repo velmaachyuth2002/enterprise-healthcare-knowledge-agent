@@ -1,0 +1,22 @@
+[project]
+name = "enterprise-healthcare-knowledge-agent"
+version = "0.1.0"
+description = "Enterprise Healthcare Knowledge Agent"
+authors = [
+    { name = "Achyuth Velma", email = "achyuthr37@gmail.com" }
+]
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "langgraph>=1.2.10",
+    "pydantic>=2.13.4",
+]
+
+# Application, not a published library — no build backend needed, just an
+# environment. Lets us use a flat `app/` package instead of `src/<name>/`.
+[tool.uv]
+package = false
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+]
