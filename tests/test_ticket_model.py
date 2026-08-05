@@ -1,22 +1,13 @@
 from datetime import UTC, datetime
 
-from sqlalchemy import create_engine, text
-from sqlalchemy.orm import sessionmaker
+from sqlalchemy import text
+from sqlalchemy.orm import Session
 
-from app.database.session import Base
 from app.models.ticket import Ticket, TicketPriority, TicketStatus
 
 
-def _in_memory_session():
-    engine = create_engine("sqlite:///:memory:")
-    Base.metadata.create_all(bind=engine)
-    return sessionmaker(bind=engine)()
-
-
-def test_ticket_round_trips_through_the_database() -> None:
-    session = _in_memory_session()
-
-    session.add(
+def test_ticket_round_trips_through_the_database(db_session: Session) -> None:
+    db_session.add(
         Ticket(
             subject="Provider onboarding failing for new NPI numbers",
             status=TicketStatus.OPEN,
@@ -24,9 +15,9 @@ def test_ticket_round_trips_through_the_database() -> None:
             created_at=datetime(2026, 7, 1, tzinfo=UTC),
         )
     )
-    session.commit()
+    db_session.commit()
 
-    ticket = session.query(Ticket).one()
+    ticket = db_session.query(Ticket).one()
 
     assert ticket.subject == "Provider onboarding failing for new NPI numbers"
     assert ticket.status == TicketStatus.OPEN
@@ -34,13 +25,12 @@ def test_ticket_round_trips_through_the_database() -> None:
     assert ticket.resolved_at is None
 
 
-def test_status_is_stored_as_its_lowercase_value_not_the_enum_name() -> None:
+def test_status_is_stored_as_its_lowercase_value_not_the_enum_name(db_session: Session) -> None:
     # Guards against SQLAlchemy's default Enum behavior, which persists the
     # member *name* ("OPEN") rather than its value ("open") unless told
     # otherwise. A future SQL tool comparing against "open" would silently
     # match zero rows if this regressed.
-    session = _in_memory_session()
-    session.add(
+    db_session.add(
         Ticket(
             subject="Test",
             status=TicketStatus.OPEN,
@@ -48,8 +38,8 @@ def test_status_is_stored_as_its_lowercase_value_not_the_enum_name() -> None:
             created_at=datetime(2026, 7, 1, tzinfo=UTC),
         )
     )
-    session.commit()
+    db_session.commit()
 
-    raw_status = session.execute(text("SELECT status FROM tickets")).scalar_one()
+    raw_status = db_session.execute(text("SELECT status FROM tickets")).scalar_one()
 
     assert raw_status == "open"
