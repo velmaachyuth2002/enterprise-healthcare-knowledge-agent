@@ -3,7 +3,9 @@ from datetime import date
 from typing import Literal, TypedDict
 
 from langgraph.graph import END, START, StateGraph
+from pydantic import ValidationError
 
+from app.services.llm_gateway import LlmGateway, ToolSpec
 from app.tools.policy_tool import PolicyLookupInput, PolicyLookupResult, PolicyTool
 from app.tools.sql_tool import (
     TicketCountInput,
@@ -22,29 +24,21 @@ Decision = Literal[
     "respond",
 ]
 
+_CLARIFY_MESSAGE = (
+    "I understood what you wanted, but couldn't quite parse the details - could you rephrase?"
+)
+
 
 class AgentState(TypedDict):
     question: str
     decision: Decision | None
+    blocked: bool | None
+    planner_content: str | None
     topic: str | None
     count_range_start: date | None
     count_range_end: date | None
     tool_result: ToolResult | None
     answer: str | None
-
-
-def _extract_topic(question: str, known_topics: list[str]) -> str | None:
-    normalized = question.lower()
-    return next((topic for topic in known_topics if topic.replace("_", " ") in normalized), None)
-
-
-def _last_month_range(today: date) -> tuple[date, date]:
-    end = today.replace(day=1)
-    if end.month == 1:
-        start = end.replace(year=end.year - 1, month=12)
-    else:
-        start = end.replace(month=end.month - 1)
-    return start, end
 
 
 def _route_after_planner(state: AgentState) -> Decision:
@@ -54,8 +48,14 @@ def _route_after_planner(state: AgentState) -> Decision:
 
 
 def _respond(state: AgentState) -> dict[str, str]:
+    if state.get("blocked"):
+        return {"answer": "I can't help with that request."}
+
     result = state.get("tool_result")
     if result is None:
+        planner_content = state.get("planner_content")
+        if planner_content:
+            return {"answer": planner_content}
         return {"answer": "I don't have a way to answer that yet."}
 
     if isinstance(result, PolicyLookupResult):
@@ -84,45 +84,71 @@ def build_graph(
     policy_tool: PolicyTool,
     ticket_count_tool: TicketCountTool,
     unresolved_tickets_tool: UnresolvedTicketsTool,
+    gateway: LlmGateway,
     today: Callable[[], date] = date.today,
 ):
-    known_topics = policy_tool.known_topics()
+    # Built once, not per-invocation. PolicyTool's description is enriched
+    # with its real known topics - without this the model has no way to
+    # know what a valid `topic` argument looks like and will hallucinate
+    # one that never matches anything in the tool's lookup table.
+    tool_specs = [
+        ToolSpec(
+            name=policy_tool.name,
+            description=(
+                f"{policy_tool.description} "
+                f"Valid topics: {', '.join(policy_tool.known_topics())}."
+            ),
+            parameters=PolicyLookupInput.model_json_schema(),
+        ),
+        ToolSpec(
+            name=ticket_count_tool.name,
+            description=ticket_count_tool.description,
+            parameters=TicketCountInput.model_json_schema(),
+        ),
+        ToolSpec(
+            name=unresolved_tickets_tool.name,
+            description=unresolved_tickets_tool.description,
+            parameters={"type": "object", "properties": {}},
+        ),
+    ]
 
     def _planner(state: AgentState) -> dict[str, object]:
-        # Deterministic stand-in for an LLM-driven planner: matches
-        # keywords instead of true intent understanding. Everything
-        # downstream only reads `decision` and whatever arguments were set
-        # alongside it, so swapping this for a real LLM call later touches
-        # this function only.
-        #
-        # Known limitation: any ticket-count-shaped question always
-        # resolves to "last month", regardless of what range it actually
-        # asked for - fixed once a real LLM planner can parse the relative
-        # date expression itself.
-        question = state["question"].lower()
+        # `today()` is injected (not date.today() called directly) for two
+        # reasons: testability, and because the model has no built-in
+        # notion of the current date - without this, relative expressions
+        # like "last month" have no principled way to resolve.
+        question = f"Today's date is {today().isoformat()}. {state['question']}"
+        decision = gateway.decide_tool_call(question, tool_specs)
 
-        topic = _extract_topic(question, known_topics)
-        if topic is not None:
-            return {"decision": "call_policy_tool", "topic": topic}
+        if decision.blocked:
+            return {"decision": "respond", "blocked": True}
 
-        if "unresolved" in question:
-            return {"decision": "call_unresolved_tickets_tool"}
+        if decision.tool_name == policy_tool.name:
+            try:
+                args = PolicyLookupInput.model_validate(decision.arguments)
+            except ValidationError:
+                return {"decision": "respond", "planner_content": _CLARIFY_MESSAGE}
+            return {"decision": "call_policy_tool", "topic": args.topic}
 
-        if "ticket" in question and ("how many" in question or "count" in question):
-            start, end = _last_month_range(today())
+        if decision.tool_name == ticket_count_tool.name:
+            try:
+                args = TicketCountInput.model_validate(decision.arguments)
+            except ValidationError:
+                return {"decision": "respond", "planner_content": _CLARIFY_MESSAGE}
             return {
                 "decision": "call_ticket_count_tool",
-                "count_range_start": start,
-                "count_range_end": end,
+                "count_range_start": args.start,
+                "count_range_end": args.end,
             }
 
-        if "policy" in question:
-            # Looks policy-shaped but didn't match a known topic - still
-            # try the tool so it can report "not found" explicitly, rather
-            # than silently falling back to the generic no-tool answer.
-            return {"decision": "call_policy_tool", "topic": state["question"]}
+        if decision.tool_name == unresolved_tickets_tool.name:
+            return {"decision": "call_unresolved_tickets_tool"}
 
-        return {"decision": "respond"}
+        # decision.tool_name is either None (model chose to just respond)
+        # or names a tool that doesn't exist (hallucinated) - both are
+        # handled the same way: nothing to execute, fall back to whatever
+        # plain-text reply the model gave.
+        return {"decision": "respond", "planner_content": decision.content}
 
     def _call_policy_tool(state: AgentState) -> dict[str, PolicyLookupResult]:
         # `_planner` only routes here when it has also set `topic`.
