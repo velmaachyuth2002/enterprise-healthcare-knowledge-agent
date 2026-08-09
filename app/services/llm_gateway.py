@@ -16,6 +16,12 @@ _PRICING_PER_MILLION_TOKENS: dict[str, tuple[float, float]] = {
     "openai/gpt-oss-20b": (0.10, 0.50),
 }
 
+_SYNTHESIS_SYSTEM_PROMPT = (
+    "Answer the question using only the information in the provided context. "
+    "If the context does not contain the answer, say you don't have enough "
+    "information rather than guessing or using outside knowledge."
+)
+
 
 class ToolSpec(BaseModel):
     name: str
@@ -28,6 +34,11 @@ class ToolCallDecision(BaseModel):
     tool_name: str | None = None
     arguments: dict[str, Any] = Field(default_factory=dict)
     content: str | None = None
+
+
+class SynthesizedAnswer(BaseModel):
+    blocked: bool = False
+    text: str | None = None
 
 
 def _to_groq_tool(tool: ToolSpec) -> dict[str, Any]:
@@ -61,20 +72,64 @@ class LlmGateway:
         self._feature = feature
 
     def decide_tool_call(self, question: str, tools: list[ToolSpec]) -> ToolCallDecision:
-        if detect_prompt_injection(question):
+        response = self._complete(
+            messages=[{"role": "user", "content": question}],
+            texts_to_screen=[question],
+            tools=tools,
+        )
+        if response is None:
+            return ToolCallDecision(blocked=True)
+
+        message = response.choices[0].message
+        if message.tool_calls:
+            call = message.tool_calls[0]
+            return ToolCallDecision(
+                tool_name=call.function.name,
+                arguments=json.loads(call.function.arguments),
+            )
+        return ToolCallDecision(content=message.content)
+
+    def answer_from_context(self, question: str, context: str) -> SynthesizedAnswer:
+        # Both the question and the retrieved context are screened - an
+        # injection payload doesn't have to come from the user typing it in;
+        # it can just as easily be planted inside a document that later gets
+        # retrieved and fed back into the prompt as "trusted" context.
+        response = self._complete(
+            messages=[
+                {"role": "system", "content": _SYNTHESIS_SYSTEM_PROMPT},
+                {"role": "user", "content": f"Context:\n{context}\n\nQuestion: {question}"},
+            ],
+            texts_to_screen=[question, context],
+        )
+        if response is None:
+            return SynthesizedAnswer(blocked=True)
+        return SynthesizedAnswer(text=response.choices[0].message.content)
+
+    def _complete(
+        self,
+        messages: list[dict[str, str]],
+        texts_to_screen: list[str],
+        tools: list[ToolSpec] | None = None,
+    ) -> Any | None:
+        """Shared plumbing for every Groq call: injection screening, timing,
+        cost estimation, and usage persistence. Returns the raw response, or
+        None if the call was blocked before ever reaching the API."""
+        if any(detect_prompt_injection(text) for text in texts_to_screen):
             self._record_usage(
                 prompt_tokens=0, completion_tokens=0, cost_usd=0.0, latency_ms=0,
                 status=LlmUsageStatus.BLOCKED,
             )
-            return ToolCallDecision(blocked=True)
+            return None
+
+        kwargs: dict[str, Any] = {}
+        if tools is not None:
+            kwargs["tools"] = [_to_groq_tool(tool) for tool in tools]
+            kwargs["tool_choice"] = "auto"
 
         start = time.monotonic()
         try:
             response = self._client.chat.completions.create(
-                model=self._model,
-                messages=[{"role": "user", "content": question}],
-                tools=[_to_groq_tool(tool) for tool in tools],
-                tool_choice="auto",
+                model=self._model, messages=messages, **kwargs
             )
         except Exception:
             latency_ms = int((time.monotonic() - start) * 1000)
@@ -94,15 +149,7 @@ class LlmGateway:
             latency_ms=latency_ms,
             status=LlmUsageStatus.SUCCESS,
         )
-
-        message = response.choices[0].message
-        if message.tool_calls:
-            call = message.tool_calls[0]
-            return ToolCallDecision(
-                tool_name=call.function.name,
-                arguments=json.loads(call.function.arguments),
-            )
-        return ToolCallDecision(content=message.content)
+        return response
 
     def _record_usage(
         self,
