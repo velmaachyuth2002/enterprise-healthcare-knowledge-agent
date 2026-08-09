@@ -6,7 +6,11 @@ from langgraph.graph import END, START, StateGraph
 from pydantic import ValidationError
 
 from app.services.llm_gateway import LlmGateway, ToolSpec
-from app.tools.policy_tool import PolicyLookupInput, PolicyLookupResult, PolicyTool
+from app.tools.document_search_tool import (
+    DocumentSearchInput,
+    DocumentSearchResult,
+    DocumentSearchTool,
+)
 from app.tools.sql_tool import (
     TicketCountInput,
     TicketCountResult,
@@ -15,10 +19,10 @@ from app.tools.sql_tool import (
     UnresolvedTicketsTool,
 )
 
-ToolResult = PolicyLookupResult | TicketCountResult | UnresolvedTicketsResult
+ToolResult = DocumentSearchResult | TicketCountResult | UnresolvedTicketsResult
 
 Decision = Literal[
-    "call_policy_tool",
+    "call_document_search_tool",
     "call_ticket_count_tool",
     "call_unresolved_tickets_tool",
     "respond",
@@ -34,7 +38,7 @@ class AgentState(TypedDict):
     decision: Decision | None
     blocked: bool | None
     planner_content: str | None
-    topic: str | None
+    query: str | None
     count_range_start: date | None
     count_range_end: date | None
     tool_result: ToolResult | None
@@ -58,10 +62,11 @@ def _respond(state: AgentState) -> dict[str, str]:
             return {"answer": planner_content}
         return {"answer": "I don't have a way to answer that yet."}
 
-    if isinstance(result, PolicyLookupResult):
+    if isinstance(result, DocumentSearchResult):
         if not result.found:
-            return {"answer": "I couldn't find a policy on that topic."}
-        return {"answer": f"{result.policy_name}: {result.content}"}
+            return {"answer": "I couldn't find anything relevant in our documents."}
+        best = result.chunks[0]
+        return {"answer": f"{best.source} — {best.heading}: {best.content}"}
 
     if isinstance(result, TicketCountResult):
         return {"answer": f"{result.count} ticket(s) were opened in that period."}
@@ -81,24 +86,18 @@ def _respond(state: AgentState) -> dict[str, str]:
 
 
 def build_graph(
-    policy_tool: PolicyTool,
+    document_search_tool: DocumentSearchTool,
     ticket_count_tool: TicketCountTool,
     unresolved_tickets_tool: UnresolvedTicketsTool,
     gateway: LlmGateway,
     today: Callable[[], date] = date.today,
 ):
-    # Built once, not per-invocation. PolicyTool's description is enriched
-    # with its real known topics - without this the model has no way to
-    # know what a valid `topic` argument looks like and will hallucinate
-    # one that never matches anything in the tool's lookup table.
+    # Built once, not per-invocation.
     tool_specs = [
         ToolSpec(
-            name=policy_tool.name,
-            description=(
-                f"{policy_tool.description} "
-                f"Valid topics: {', '.join(policy_tool.known_topics())}."
-            ),
-            parameters=PolicyLookupInput.model_json_schema(),
+            name=document_search_tool.name,
+            description=document_search_tool.description,
+            parameters=DocumentSearchInput.model_json_schema(),
         ),
         ToolSpec(
             name=ticket_count_tool.name,
@@ -123,12 +122,12 @@ def build_graph(
         if decision.blocked:
             return {"decision": "respond", "blocked": True}
 
-        if decision.tool_name == policy_tool.name:
+        if decision.tool_name == document_search_tool.name:
             try:
-                args = PolicyLookupInput.model_validate(decision.arguments)
+                args = DocumentSearchInput.model_validate(decision.arguments)
             except ValidationError:
                 return {"decision": "respond", "planner_content": _CLARIFY_MESSAGE}
-            return {"decision": "call_policy_tool", "topic": args.topic}
+            return {"decision": "call_document_search_tool", "query": args.query}
 
         if decision.tool_name == ticket_count_tool.name:
             try:
@@ -150,9 +149,9 @@ def build_graph(
         # plain-text reply the model gave.
         return {"decision": "respond", "planner_content": decision.content}
 
-    def _call_policy_tool(state: AgentState) -> dict[str, PolicyLookupResult]:
-        # `_planner` only routes here when it has also set `topic`.
-        result = policy_tool.run(PolicyLookupInput(topic=state["topic"]))
+    def _call_document_search_tool(state: AgentState) -> dict[str, DocumentSearchResult]:
+        # `_planner` only routes here when it has also set `query`.
+        result = document_search_tool.run(DocumentSearchInput(query=state["query"]))
         return {"tool_result": result}
 
     def _call_ticket_count_tool(state: AgentState) -> dict[str, TicketCountResult]:
@@ -168,7 +167,7 @@ def build_graph(
 
     graph = StateGraph(AgentState)
     graph.add_node("planner", _planner)
-    graph.add_node("call_policy_tool", _call_policy_tool)
+    graph.add_node("call_document_search_tool", _call_document_search_tool)
     graph.add_node("call_ticket_count_tool", _call_ticket_count_tool)
     graph.add_node("call_unresolved_tickets_tool", _call_unresolved_tickets_tool)
     graph.add_node("respond", _respond)
@@ -178,13 +177,13 @@ def build_graph(
         "planner",
         _route_after_planner,
         {
-            "call_policy_tool": "call_policy_tool",
+            "call_document_search_tool": "call_document_search_tool",
             "call_ticket_count_tool": "call_ticket_count_tool",
             "call_unresolved_tickets_tool": "call_unresolved_tickets_tool",
             "respond": "respond",
         },
     )
-    graph.add_edge("call_policy_tool", "respond")
+    graph.add_edge("call_document_search_tool", "respond")
     graph.add_edge("call_ticket_count_tool", "respond")
     graph.add_edge("call_unresolved_tickets_tool", "respond")
     graph.add_edge("respond", END)

@@ -45,7 +45,8 @@ def _fake_groq_client_calling(tool_name: str, arguments: dict):
 def test_ask_with_policy_question_returns_answer(db_session: Session) -> None:
     app.dependency_overrides[get_db] = _override_get_db(db_session)
     app.dependency_overrides[get_groq_client] = lambda: _fake_groq_client_calling(
-        "policy_lookup", {"topic": "provider_onboarding"}
+        "search_documents",
+        {"query": "How long does provider onboarding take for a hospital or clinic?"},
     )
     client = TestClient(app)
 
@@ -57,7 +58,7 @@ def test_ask_with_policy_question_returns_answer(db_session: Session) -> None:
         app.dependency_overrides.clear()
 
     assert response.status_code == 200
-    assert "Provider Onboarding Policy" in response.json()["answer"]
+    assert "provider_onboarding_guide.md" in response.json()["answer"]
 
 
 def test_ask_rejects_empty_question() -> None:

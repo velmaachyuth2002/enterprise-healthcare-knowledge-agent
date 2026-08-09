@@ -9,6 +9,7 @@ class Settings(BaseSettings):
     database_url: str = "sqlite:///./dev.db"
     groq_api_key: str = ""
     groq_model: str = "openai/gpt-oss-20b"
+    documents_dir: str = "documents"
 
 
 @lru_cache
