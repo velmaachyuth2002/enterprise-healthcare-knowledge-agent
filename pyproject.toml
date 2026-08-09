@@ -12,6 +12,8 @@ dependencies = [
     "langgraph>=1.2.10",
     "pydantic>=2.13.4",
     "pydantic-settings>=2.14.2",
+    "qdrant-client>=1.19.0",
+    "sentence-transformers>=5.7.0",
     "sqlalchemy>=2.0.51",
     "uvicorn[standard]>=0.52.1",
 ]

@@ -1,4 +1,5 @@
 from collections.abc import Generator
+from pathlib import Path
 
 import pytest
 from sqlalchemy import create_engine
@@ -6,6 +7,18 @@ from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 
 from app.database.session import Base
+from app.services.document_index import DocumentIndex
+
+_DOCUMENTS_DIR = Path(__file__).resolve().parent.parent / "documents"
+
+
+@pytest.fixture(scope="session")
+def document_index() -> DocumentIndex:
+    # Session-scoped: loading the sentence-transformers model is the slow
+    # part (roughly a second), and it's the same model/corpus for every
+    # test that needs it - rebuilding per-test would make the suite slow
+    # for no correctness benefit.
+    return DocumentIndex(_DOCUMENTS_DIR)
 
 
 @pytest.fixture
