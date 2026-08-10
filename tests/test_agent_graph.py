@@ -6,8 +6,8 @@ from sqlalchemy.orm import Session
 from app.core.config import get_settings
 from app.graph.agent_graph import _CLARIFY_MESSAGE, build_graph
 from app.models.ticket import Ticket, TicketPriority, TicketStatus
-from app.services.document_index import DocumentIndex
-from app.services.llm_gateway import LlmGateway, ToolCallDecision, ToolSpec
+from app.services.document_index import DocumentIndex, ScoredChunk
+from app.services.llm_gateway import LlmGateway, SynthesizedAnswer, ToolCallDecision, ToolSpec
 from app.tools.document_search_tool import DocumentSearchResult, DocumentSearchTool
 from app.tools.sql_tool import (
     TicketCountResult,
@@ -20,17 +20,29 @@ _UNUSED_DOCUMENT_RESULT = DocumentSearchResult(found=False)
 
 
 class _FakeGateway:
-    """Test double for the whole LlmGateway - returns a canned decision so
-    planner logic (routing, validation, fallbacks) is testable without real
-    model variance."""
+    """Test double for the whole LlmGateway - returns a canned decision (and,
+    for the document-search path, a canned synthesized answer) so planner
+    and synthesis logic are testable without real model variance."""
 
-    def __init__(self, decision: ToolCallDecision) -> None:
+    def __init__(
+        self,
+        decision: ToolCallDecision,
+        synthesized_answer: SynthesizedAnswer | None = None,
+    ) -> None:
         self._decision = decision
+        self._synthesized_answer = synthesized_answer or SynthesizedAnswer(
+            text="fake synthesized answer"
+        )
         self.called_with: tuple[str, list[ToolSpec]] | None = None
+        self.synthesis_called_with: tuple[str, str] | None = None
 
     def decide_tool_call(self, question: str, tools: list[ToolSpec]) -> ToolCallDecision:
         self.called_with = (question, tools)
         return self._decision
+
+    def answer_from_context(self, question: str, context: str) -> SynthesizedAnswer:
+        self.synthesis_called_with = (question, context)
+        return self._synthesized_answer
 
 
 class _RecordingFakeDocumentSearchTool:
@@ -72,7 +84,7 @@ class _RecordingFakeUnresolvedTicketsTool:
         return self._result
 
 
-def test_document_search_decision_routes_to_document_search_tool(
+def test_document_search_decision_synthesizes_answer_with_citation(
     document_index: DocumentIndex,
 ) -> None:
     document_search_tool = DocumentSearchTool(document_index)
@@ -83,13 +95,19 @@ def test_document_search_decision_routes_to_document_search_tool(
     gateway = _FakeGateway(
         ToolCallDecision(
             tool_name=document_search_tool.name, arguments={"query": "password requirements"}
-        )
+        ),
+        synthesized_answer=SynthesizedAnswer(text="Passwords must be 12+ characters."),
     )
     graph = build_graph(document_search_tool, fake_count_tool, fake_unresolved_tool, gateway)
 
     result = graph.invoke({"question": "What are the password requirements?"})
 
-    assert "hipaa_security_policy.md" in result["answer"]
+    assert result["answer"] == (
+        "Passwords must be 12+ characters.\n\n(Source: hipaa_security_policy.md)"
+    )
+    # The retrieved chunk content was actually passed to the synthesizer,
+    # not just used for the deterministic citation.
+    assert "hipaa_security_policy.md" in gateway.synthesis_called_with[1]
     assert fake_count_tool.called_with is None
     assert fake_unresolved_tool.called is False
 
@@ -108,6 +126,30 @@ def test_document_search_with_no_match_reports_not_found() -> None:
     result = graph.invoke({"question": "anything"})
 
     assert result["answer"] == "I couldn't find anything relevant in our documents."
+    # Not found short-circuits before ever reaching synthesis.
+    assert gateway.synthesis_called_with is None
+
+
+def test_document_search_synthesis_blocked_reports_refusal() -> None:
+    document_search_tool = _RecordingFakeDocumentSearchTool(
+        DocumentSearchResult(
+            found=True,
+            chunks=[ScoredChunk(source="doc.md", heading="Some Heading", content="body", score=0.9)],
+        )
+    )
+    fake_count_tool = _RecordingFakeTicketCountTool(TicketCountResult(count=0))
+    fake_unresolved_tool = _RecordingFakeUnresolvedTicketsTool(
+        UnresolvedTicketsResult(tickets=[])
+    )
+    gateway = _FakeGateway(
+        ToolCallDecision(tool_name=document_search_tool.name, arguments={"query": "x"}),
+        synthesized_answer=SynthesizedAnswer(blocked=True),
+    )
+    graph = build_graph(document_search_tool, fake_count_tool, fake_unresolved_tool, gateway)
+
+    result = graph.invoke({"question": "x"})
+
+    assert result["answer"] == "I can't help with that request."
 
 
 def test_ticket_count_tool_call_decision_routes_to_ticket_count_tool(db_session: Session) -> None:
@@ -326,3 +368,4 @@ def test_live_document_search_question_returns_relevant_content(
     result = graph.invoke({"question": "What is our provider onboarding policy?"})
 
     assert "onboarding" in result["answer"].lower()
+    assert "(Source:" in result["answer"]

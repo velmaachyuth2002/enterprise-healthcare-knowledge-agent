@@ -5,6 +5,7 @@ from typing import Literal, TypedDict
 from langgraph.graph import END, START, StateGraph
 from pydantic import ValidationError
 
+from app.services.document_index import ScoredChunk
 from app.services.llm_gateway import LlmGateway, ToolSpec
 from app.tools.document_search_tool import (
     DocumentSearchInput,
@@ -51,38 +52,8 @@ def _route_after_planner(state: AgentState) -> Decision:
     return state["decision"]
 
 
-def _respond(state: AgentState) -> dict[str, str]:
-    if state.get("blocked"):
-        return {"answer": "I can't help with that request."}
-
-    result = state.get("tool_result")
-    if result is None:
-        planner_content = state.get("planner_content")
-        if planner_content:
-            return {"answer": planner_content}
-        return {"answer": "I don't have a way to answer that yet."}
-
-    if isinstance(result, DocumentSearchResult):
-        if not result.found:
-            return {"answer": "I couldn't find anything relevant in our documents."}
-        best = result.chunks[0]
-        return {"answer": f"{best.source} — {best.heading}: {best.content}"}
-
-    if isinstance(result, TicketCountResult):
-        return {"answer": f"{result.count} ticket(s) were opened in that period."}
-
-    if isinstance(result, UnresolvedTicketsResult):
-        if not result.tickets:
-            return {"answer": "There are no unresolved tickets."}
-        subjects = "; ".join(ticket.subject for ticket in result.tickets)
-        return {"answer": f"{len(result.tickets)} unresolved ticket(s): {subjects}"}
-
-    # Not a defensive no-op: unlike the state-field guarantees above (which
-    # our own control flow makes provably true), "every ToolResult member is
-    # handled" is a property that rots the moment a new tool is added and
-    # this function isn't updated to match. Fail loudly at the gap instead
-    # of a KeyError three layers away when `answer` turns out unset.
-    raise AssertionError(f"unhandled tool result type: {type(result)}")
+def _format_context(chunks: list[ScoredChunk]) -> str:
+    return "\n\n".join(f"[{chunk.source} — {chunk.heading}]\n{chunk.content}" for chunk in chunks)
 
 
 def build_graph(
@@ -164,6 +135,44 @@ def build_graph(
     def _call_unresolved_tickets_tool(state: AgentState) -> dict[str, UnresolvedTicketsResult]:
         result = unresolved_tickets_tool.run()
         return {"tool_result": result}
+
+    def _respond(state: AgentState) -> dict[str, str]:
+        if state.get("blocked"):
+            return {"answer": "I can't help with that request."}
+
+        result = state.get("tool_result")
+        if result is None:
+            planner_content = state.get("planner_content")
+            if planner_content:
+                return {"answer": planner_content}
+            return {"answer": "I don't have a way to answer that yet."}
+
+        if isinstance(result, DocumentSearchResult):
+            if not result.found:
+                return {"answer": "I couldn't find anything relevant in our documents."}
+            synthesized = gateway.answer_from_context(
+                state["question"], _format_context(result.chunks)
+            )
+            if synthesized.blocked:
+                return {"answer": "I can't help with that request."}
+            return {"answer": f"{synthesized.text}\n\n(Source: {result.chunks[0].source})"}
+
+        if isinstance(result, TicketCountResult):
+            return {"answer": f"{result.count} ticket(s) were opened in that period."}
+
+        if isinstance(result, UnresolvedTicketsResult):
+            if not result.tickets:
+                return {"answer": "There are no unresolved tickets."}
+            subjects = "; ".join(ticket.subject for ticket in result.tickets)
+            return {"answer": f"{len(result.tickets)} unresolved ticket(s): {subjects}"}
+
+        # Not a defensive no-op: unlike the state-field guarantees above
+        # (which our own control flow makes provably true), "every
+        # ToolResult member is handled" is a property that rots the moment a
+        # new tool is added and this function isn't updated to match. Fail
+        # loudly at the gap instead of a KeyError three layers away when
+        # `answer` turns out unset.
+        raise AssertionError(f"unhandled tool result type: {type(result)}")
 
     graph = StateGraph(AgentState)
     graph.add_node("planner", _planner)
