@@ -10,6 +10,9 @@ class Settings(BaseSettings):
     groq_api_key: str = ""
     groq_model: str = "openai/gpt-oss-20b"
     documents_dir: str = "documents"
+    jwt_secret: str = ""
+    jwt_algorithm: str = "HS256"
+    jwt_expiry_minutes: int = 480
 
 
 @lru_cache

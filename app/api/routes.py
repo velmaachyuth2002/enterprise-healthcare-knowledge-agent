@@ -1,7 +1,9 @@
+from datetime import UTC, datetime
 from functools import lru_cache
 from pathlib import Path
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi.security import OAuth2PasswordRequestForm
 from groq import Groq
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
@@ -9,6 +11,8 @@ from sqlalchemy.orm import Session
 from app.core.config import get_settings
 from app.database.session import get_db
 from app.graph.agent_graph import build_graph
+from app.models.user import User
+from app.services.auth import create_access_token, verify_password
 from app.services.document_index import DocumentIndex
 from app.services.llm_gateway import LlmGateway
 from app.tools.document_search_tool import DocumentSearchTool
@@ -23,6 +27,35 @@ class AskRequest(BaseModel):
 
 class AskResponse(BaseModel):
     answer: str
+
+
+class TokenResponse(BaseModel):
+    access_token: str
+    token_type: str = "bearer"
+
+
+@router.post("/login", response_model=TokenResponse)
+def login(
+    form_data: OAuth2PasswordRequestForm = Depends(), session: Session = Depends(get_db)
+) -> TokenResponse:
+    # form_data.username holds the email - that's the OAuth2 password-flow
+    # field name FastAPI's docs UI expects, not a statement that email and
+    # username are different things here.
+    user = session.query(User).filter_by(email=form_data.username).first()
+    if user is None or not verify_password(form_data.password, user.hashed_password):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED, detail="Incorrect email or password"
+        )
+
+    settings = get_settings()
+    token = create_access_token(
+        user.id,
+        secret=settings.jwt_secret,
+        algorithm=settings.jwt_algorithm,
+        expires_minutes=settings.jwt_expiry_minutes,
+        now=datetime.now(UTC),
+    )
+    return TokenResponse(access_token=token)
 
 
 @lru_cache

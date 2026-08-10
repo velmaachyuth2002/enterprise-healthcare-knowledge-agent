@@ -58,9 +58,10 @@ Every LLM call — the planner's tool-call decision and the RAG answer synthesis
 # 1. Install dependencies
 uv sync
 
-# 2. Configure your Groq API key
+# 2. Configure secrets
 cp .env.example .env
-# edit .env and set GROQ_API_KEY (get one at https://console.groq.com/keys)
+# edit .env: set GROQ_API_KEY (get one at https://console.groq.com/keys)
+# and JWT_SECRET (generate with: python -c "import secrets; print(secrets.token_hex(32))")
 
 # 3. Run the server
 uv run uvicorn app.main:app --reload

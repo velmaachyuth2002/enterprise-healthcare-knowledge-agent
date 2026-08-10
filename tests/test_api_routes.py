@@ -9,6 +9,8 @@ from app.api.routes import get_agent_graph, get_groq_client
 from app.database.session import get_db
 from app.main import app
 from app.models.ticket import Ticket, TicketPriority, TicketStatus
+from app.models.user import User, UserRole
+from app.services.auth import hash_password
 
 
 class _FakeGraph:
@@ -125,3 +127,68 @@ def test_ask_uses_injected_graph_dependency() -> None:
 
     assert response.status_code == 200
     assert response.json()["answer"] == "stub answer for: anything"
+
+
+def test_login_returns_a_token_for_correct_credentials(db_session: Session) -> None:
+    db_session.add(
+        User(
+            email="employee@medflow.example",
+            name="Alex Chen",
+            hashed_password=hash_password("correct-password"),
+            role=UserRole.EMPLOYEE,
+        )
+    )
+    db_session.commit()
+    app.dependency_overrides[get_db] = _override_get_db(db_session)
+    client = TestClient(app)
+
+    try:
+        response = client.post(
+            "/login",
+            data={"username": "employee@medflow.example", "password": "correct-password"},
+        )
+    finally:
+        app.dependency_overrides.clear()
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["token_type"] == "bearer"
+    assert len(body["access_token"]) > 0
+
+
+def test_login_rejects_wrong_password(db_session: Session) -> None:
+    db_session.add(
+        User(
+            email="employee@medflow.example",
+            name="Alex Chen",
+            hashed_password=hash_password("correct-password"),
+            role=UserRole.EMPLOYEE,
+        )
+    )
+    db_session.commit()
+    app.dependency_overrides[get_db] = _override_get_db(db_session)
+    client = TestClient(app)
+
+    try:
+        response = client.post(
+            "/login",
+            data={"username": "employee@medflow.example", "password": "wrong-password"},
+        )
+    finally:
+        app.dependency_overrides.clear()
+
+    assert response.status_code == 401
+
+
+def test_login_rejects_an_unknown_email(db_session: Session) -> None:
+    app.dependency_overrides[get_db] = _override_get_db(db_session)
+    client = TestClient(app)
+
+    try:
+        response = client.post(
+            "/login", data={"username": "nobody@medflow.example", "password": "anything"}
+        )
+    finally:
+        app.dependency_overrides.clear()
+
+    assert response.status_code == 401
