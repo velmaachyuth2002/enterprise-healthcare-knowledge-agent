@@ -6,11 +6,17 @@ from langgraph.graph import END, START, StateGraph
 from pydantic import ValidationError
 
 from app.services.document_index import ScoredChunk
+from app.services.email_service import EmailService
 from app.services.llm_gateway import LlmGateway, ToolSpec
 from app.tools.document_search_tool import (
     DocumentSearchInput,
     DocumentSearchResult,
     DocumentSearchTool,
+)
+from app.tools.escalate_ticket_tool import (
+    EscalateTicketInput,
+    EscalateTicketResult,
+    EscalateTicketTool,
 )
 from app.tools.sql_tool import (
     TicketCountInput,
@@ -20,12 +26,15 @@ from app.tools.sql_tool import (
     UnresolvedTicketsTool,
 )
 
-ToolResult = DocumentSearchResult | TicketCountResult | UnresolvedTicketsResult
+ToolResult = (
+    DocumentSearchResult | TicketCountResult | UnresolvedTicketsResult | EscalateTicketResult
+)
 
 Decision = Literal[
     "call_document_search_tool",
     "call_ticket_count_tool",
     "call_unresolved_tickets_tool",
+    "call_escalate_ticket_tool",
     "respond",
 ]
 
@@ -45,6 +54,9 @@ class AgentState(TypedDict):
     query: str | None
     count_range_start: date | None
     count_range_end: date | None
+    ticket_id: int | None
+    priority: str | None
+    reason: str | None
     tool_result: ToolResult | None
     answer: str | None
 
@@ -63,6 +75,9 @@ def build_graph(
     document_search_tool: DocumentSearchTool,
     ticket_count_tool: TicketCountTool,
     unresolved_tickets_tool: UnresolvedTicketsTool,
+    escalate_ticket_tool: EscalateTicketTool,
+    email_service: EmailService,
+    get_manager_emails: Callable[[], list[str]],
     gateway: LlmGateway,
     today: Callable[[], date] = date.today,
 ):
@@ -82,6 +97,11 @@ def build_graph(
             name=unresolved_tickets_tool.name,
             description=unresolved_tickets_tool.description,
             parameters={"type": "object", "properties": {}},
+        ),
+        ToolSpec(
+            name=escalate_ticket_tool.name,
+            description=escalate_ticket_tool.description,
+            parameters=EscalateTicketInput.model_json_schema(),
         ),
     ]
 
@@ -117,6 +137,18 @@ def build_graph(
         if decision.tool_name == unresolved_tickets_tool.name:
             return {"decision": "call_unresolved_tickets_tool"}
 
+        if decision.tool_name == escalate_ticket_tool.name:
+            try:
+                args = EscalateTicketInput.model_validate(decision.arguments)
+            except ValidationError:
+                return {"decision": "respond", "planner_content": _CLARIFY_MESSAGE}
+            return {
+                "decision": "call_escalate_ticket_tool",
+                "ticket_id": args.ticket_id,
+                "priority": args.priority,
+                "reason": args.reason,
+            }
+
         # decision.tool_name is either None (model chose to just respond)
         # or names a tool that doesn't exist (hallucinated) - both are
         # handled the same way: nothing to execute, fall back to whatever
@@ -137,6 +169,37 @@ def build_graph(
 
     def _call_unresolved_tickets_tool(state: AgentState) -> dict[str, UnresolvedTicketsResult]:
         result = unresolved_tickets_tool.run()
+        return {"tool_result": result}
+
+    def _call_escalate_ticket_tool(state: AgentState) -> dict[str, EscalateTicketResult]:
+        # `_planner` only routes here when it has also set ticket_id,
+        # priority, and reason. requester_id is never planner-set - it's
+        # only ever present because the API layer put it there from the
+        # verified JWT before graph.invoke() was called at all.
+        result = escalate_ticket_tool.run(
+            EscalateTicketInput(
+                ticket_id=state["ticket_id"], priority=state["priority"], reason=state["reason"]
+            ),
+            requester_id=state["requester_id"],
+        )
+        # Notifying is this layer's job, not the tool's - the tool stays a
+        # pure DB write with nothing to fake/mock in its own tests, and
+        # this is the same call shape the decide endpoint will use later
+        # for the employee confirmation email. get_manager_emails is only
+        # called here, not for every request, the same reason `today` is
+        # injected as a callable rather than eagerly evaluated - the query
+        # only needs to run on the one path that actually needs it.
+        if result.found:
+            for manager_email in get_manager_emails():
+                email_service.send(
+                    to=manager_email,
+                    subject=f"Approval needed: escalate ticket #{result.ticket_id}",
+                    body=(
+                        f"{state['reason']}\n\n"
+                        f"Requested priority: {result.requested_priority.value}\n"
+                        f"Approval request #{result.approval_request_id} is pending your review."
+                    ),
+                )
         return {"tool_result": result}
 
     def _respond(state: AgentState) -> dict[str, str]:
@@ -169,6 +232,18 @@ def build_graph(
             subjects = "; ".join(ticket.subject for ticket in result.tickets)
             return {"answer": f"{len(result.tickets)} unresolved ticket(s): {subjects}"}
 
+        if isinstance(result, EscalateTicketResult):
+            if not result.found:
+                return {"answer": f"I couldn't find ticket #{state['ticket_id']}."}
+            return {
+                "answer": (
+                    f"I've proposed escalating ticket #{result.ticket_id} to "
+                    f"{result.requested_priority.value} priority. This requires manager "
+                    f"approval before it takes effect "
+                    f"(request #{result.approval_request_id})."
+                )
+            }
+
         # Not a defensive no-op: unlike the state-field guarantees above
         # (which our own control flow makes provably true), "every
         # ToolResult member is handled" is a property that rots the moment a
@@ -182,6 +257,7 @@ def build_graph(
     graph.add_node("call_document_search_tool", _call_document_search_tool)
     graph.add_node("call_ticket_count_tool", _call_ticket_count_tool)
     graph.add_node("call_unresolved_tickets_tool", _call_unresolved_tickets_tool)
+    graph.add_node("call_escalate_ticket_tool", _call_escalate_ticket_tool)
     graph.add_node("respond", _respond)
 
     graph.add_edge(START, "planner")
@@ -192,12 +268,14 @@ def build_graph(
             "call_document_search_tool": "call_document_search_tool",
             "call_ticket_count_tool": "call_ticket_count_tool",
             "call_unresolved_tickets_tool": "call_unresolved_tickets_tool",
+            "call_escalate_ticket_tool": "call_escalate_ticket_tool",
             "respond": "respond",
         },
     )
     graph.add_edge("call_document_search_tool", "respond")
     graph.add_edge("call_ticket_count_tool", "respond")
     graph.add_edge("call_unresolved_tickets_tool", "respond")
+    graph.add_edge("call_escalate_ticket_tool", "respond")
     graph.add_edge("respond", END)
 
     return graph.compile()

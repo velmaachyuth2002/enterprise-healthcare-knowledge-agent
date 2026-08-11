@@ -12,11 +12,13 @@ from app.api.deps import get_current_user
 from app.core.config import get_settings
 from app.database.session import get_db
 from app.graph.agent_graph import build_graph
-from app.models.user import User
+from app.models.user import User, UserRole
 from app.services.auth import create_access_token, verify_password
 from app.services.document_index import DocumentIndex
+from app.services.email_service import EmailService
 from app.services.llm_gateway import LlmGateway
 from app.tools.document_search_tool import DocumentSearchTool
+from app.tools.escalate_ticket_tool import EscalateTicketTool
 from app.tools.sql_tool import TicketCountTool, UnresolvedTicketsTool
 
 router = APIRouter()
@@ -78,20 +80,40 @@ def get_document_search_tool() -> DocumentSearchTool:
     return DocumentSearchTool(DocumentIndex(Path(settings.documents_dir)))
 
 
+@lru_cache
+def get_email_service() -> EmailService:
+    # Cached for the same reason as get_groq_client/get_document_search_tool:
+    # host/port/from-address don't vary per request.
+    settings = get_settings()
+    return EmailService(
+        host=settings.smtp_host, port=settings.smtp_port, from_address=settings.smtp_from_address
+    )
+
+
 def get_agent_graph(
     session: Session = Depends(get_db),
     client: Groq = Depends(get_groq_client),
     document_search_tool: DocumentSearchTool = Depends(get_document_search_tool),
+    email_service: EmailService = Depends(get_email_service),
 ):
-    # Not cached: two of these three tools, and the gateway itself, hold a
+    # Not cached: most of these tools, and the gateway itself, hold a
     # per-request Session that get_db() closes at the end of this request,
     # so a graph built from it can't be reused by a later request.
     settings = get_settings()
     gateway = LlmGateway(client, settings.groq_model, session, feature="planner_tool_selection")
+
+    def get_manager_emails() -> list[str]:
+        # Deferred rather than queried eagerly here: this only needs to run
+        # on the (rare) escalation path, not on every /ask request.
+        return [user.email for user in session.query(User).filter_by(role=UserRole.MANAGER).all()]
+
     return build_graph(
         document_search_tool,
         TicketCountTool(session),
         UnresolvedTicketsTool(session),
+        EscalateTicketTool(session),
+        email_service,
+        get_manager_emails,
         gateway,
     )
 
