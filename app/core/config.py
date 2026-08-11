@@ -14,7 +14,10 @@ class Settings(BaseSettings):
     jwt_algorithm: str = "HS256"
     jwt_expiry_minutes: int = 480
     smtp_host: str = "localhost"
-    smtp_port: int = 1025
+    # 2525, not the more common 1025: on macOS, 1025 is already bound by
+    # identityservicesd (a system daemon), which silently fails aiosmtpd's
+    # bind with no obvious error unless you go looking for it.
+    smtp_port: int = 2525
     smtp_from_address: str = "noreply@medflow.example"
 
 

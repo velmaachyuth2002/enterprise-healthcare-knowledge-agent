@@ -80,8 +80,11 @@ cp .env.example .env
 uv run python -m scripts.seed_users
 
 # 4. Run a local SMTP catcher, in a separate terminal - no real provider or
-#    credentials needed, this just prints received mail to the console
-uv run python -m aiosmtpd -n -l localhost:1025
+#    credentials needed, this just prints received mail to the console.
+#    Port 2525, not the more common 1025: on macOS, 1025 is already bound
+#    by a system daemon (identityservicesd), which fails aiosmtpd's bind
+#    silently unless you go looking in its output for the error.
+uv run python -m aiosmtpd -n -l localhost:2525
 
 # 5. Run the server
 uv run uvicorn app.main:app --reload

@@ -3,7 +3,7 @@ from aiosmtpd.controller import Controller
 
 from app.services.email_service import EmailService
 
-# A fixed port distinct from the documented local dev catcher (1025), so
+# A fixed port distinct from the documented local dev catcher (2525), so
 # running the test suite never collides with a developer's own catcher
 # already running for manual testing.
 _TEST_SMTP_PORT = 10251
