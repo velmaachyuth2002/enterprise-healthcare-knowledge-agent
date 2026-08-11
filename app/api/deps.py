@@ -1,3 +1,5 @@
+from functools import lru_cache
+
 from fastapi import Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordBearer
 from sqlalchemy.orm import Session
@@ -6,6 +8,7 @@ from app.core.config import Settings, get_settings
 from app.database.session import get_db
 from app.models.user import User, UserRole
 from app.services.auth import InvalidTokenError, decode_access_token
+from app.services.email_service import EmailService
 
 # tokenUrl points Swagger's "Authorize" button at /login - it doesn't affect
 # request handling, only the interactive docs UI.
@@ -54,3 +57,13 @@ def require_role(role: UserRole):
         return current_user
 
     return _check
+
+
+@lru_cache
+def get_email_service() -> EmailService:
+    # Cached: host/port/from-address don't vary per request, same reasoning
+    # as get_groq_client/get_document_search_tool in routes.py.
+    settings = get_settings()
+    return EmailService(
+        host=settings.smtp_host, port=settings.smtp_port, from_address=settings.smtp_from_address
+    )

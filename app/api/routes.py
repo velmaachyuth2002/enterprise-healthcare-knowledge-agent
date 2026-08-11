@@ -8,7 +8,7 @@ from groq import Groq
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
-from app.api.deps import get_current_user
+from app.api.deps import get_current_user, get_email_service
 from app.core.config import get_settings
 from app.database.session import get_db
 from app.graph.agent_graph import build_graph
@@ -78,16 +78,6 @@ def get_document_search_tool() -> DocumentSearchTool:
     # every single call would be pure waste.
     settings = get_settings()
     return DocumentSearchTool(DocumentIndex(Path(settings.documents_dir)))
-
-
-@lru_cache
-def get_email_service() -> EmailService:
-    # Cached for the same reason as get_groq_client/get_document_search_tool:
-    # host/port/from-address don't vary per request.
-    settings = get_settings()
-    return EmailService(
-        host=settings.smtp_host, port=settings.smtp_port, from_address=settings.smtp_from_address
-    )
 
 
 def get_agent_graph(
