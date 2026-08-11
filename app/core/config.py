@@ -13,6 +13,9 @@ class Settings(BaseSettings):
     jwt_secret: str = ""
     jwt_algorithm: str = "HS256"
     jwt_expiry_minutes: int = 480
+    smtp_host: str = "localhost"
+    smtp_port: int = 1025
+    smtp_from_address: str = "noreply@medflow.example"
 
 
 @lru_cache
