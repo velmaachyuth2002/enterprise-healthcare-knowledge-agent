@@ -5,6 +5,7 @@ from types import SimpleNamespace
 from fastapi.testclient import TestClient
 from sqlalchemy.orm import Session
 
+from app.api.deps import get_current_user
 from app.api.routes import get_agent_graph, get_groq_client
 from app.database.session import get_db
 from app.main import app
@@ -12,9 +13,18 @@ from app.models.ticket import Ticket, TicketPriority, TicketStatus
 from app.models.user import User, UserRole
 from app.services.auth import hash_password
 
+_FAKE_AUTHENTICATED_USER = User(
+    id=1, email="employee@medflow.example", name="Alex Chen", hashed_password="x",
+    role=UserRole.EMPLOYEE,
+)
+
 
 class _FakeGraph:
+    def __init__(self) -> None:
+        self.invoked_with: dict | None = None
+
     def invoke(self, state: dict) -> dict:
+        self.invoked_with = state
         return {"answer": f"stub answer for: {state['question']}"}
 
 
@@ -23,6 +33,15 @@ def _override_get_db(session: Session):
         yield session
 
     return _get_db
+
+
+def _authenticate_as(user: User = _FAKE_AUTHENTICATED_USER):
+    # /ask needs a real authenticated identity to reach anything else -
+    # overriding get_current_user directly (rather than doing a real
+    # /login round trip in every test) keeps these tests focused on what
+    # they actually exercise, same as overriding get_db instead of hitting
+    # a real database file.
+    return lambda: user
 
 
 def _fake_groq_client_calling(
@@ -54,6 +73,7 @@ def _fake_groq_client_calling(
 
 def test_ask_with_policy_question_returns_answer(db_session: Session) -> None:
     app.dependency_overrides[get_db] = _override_get_db(db_session)
+    app.dependency_overrides[get_current_user] = _authenticate_as()
     app.dependency_overrides[get_groq_client] = lambda: _fake_groq_client_calling(
         "search_documents",
         {"query": "How long does provider onboarding take for a hospital or clinic?"},
@@ -75,9 +95,13 @@ def test_ask_with_policy_question_returns_answer(db_session: Session) -> None:
 
 
 def test_ask_rejects_empty_question() -> None:
+    app.dependency_overrides[get_current_user] = _authenticate_as()
     client = TestClient(app)
 
-    response = client.post("/ask", json={"question": ""})
+    try:
+        response = client.post("/ask", json={"question": ""})
+    finally:
+        app.dependency_overrides.clear()
 
     assert response.status_code == 422
 
@@ -97,6 +121,7 @@ def test_ask_counts_tickets_end_to_end(db_session: Session) -> None:
     db_session.commit()
 
     app.dependency_overrides[get_db] = _override_get_db(db_session)
+    app.dependency_overrides[get_current_user] = _authenticate_as()
     app.dependency_overrides[get_groq_client] = lambda: _fake_groq_client_calling(
         "count_tickets_in_range", {"start": "2026-07-01", "end": "2026-08-01"}
     )
@@ -118,6 +143,7 @@ def test_ask_uses_injected_graph_dependency() -> None:
     # on a concrete graph, so tests can swap in a fake without touching the
     # real tools, LangGraph, Groq, or the database at all.
     app.dependency_overrides[get_agent_graph] = lambda: _FakeGraph()
+    app.dependency_overrides[get_current_user] = _authenticate_as()
     client = TestClient(app)
 
     try:
@@ -127,6 +153,37 @@ def test_ask_uses_injected_graph_dependency() -> None:
 
     assert response.status_code == 200
     assert response.json()["answer"] == "stub answer for: anything"
+
+
+def test_ask_requires_authentication() -> None:
+    # No get_current_user override, no Authorization header - proves /ask
+    # is actually gated, not just gate-shaped.
+    client = TestClient(app)
+
+    response = client.post("/ask", json={"question": "anything"})
+
+    assert response.status_code == 401
+
+
+def test_ask_passes_the_authenticated_users_id_into_the_graph() -> None:
+    fake_graph = _FakeGraph()
+    authenticated_user = User(
+        id=7, email="someone@medflow.example", name="Someone", hashed_password="x",
+        role=UserRole.EMPLOYEE,
+    )
+    app.dependency_overrides[get_agent_graph] = lambda: fake_graph
+    app.dependency_overrides[get_current_user] = _authenticate_as(authenticated_user)
+    client = TestClient(app)
+
+    try:
+        client.post("/ask", json={"question": "anything"})
+    finally:
+        app.dependency_overrides.clear()
+
+    # This is the identity boundary the whole approval workflow depends on:
+    # requester_id comes from the verified token, not from the request body
+    # or anything an LLM could be tricked into supplying.
+    assert fake_graph.invoked_with["requester_id"] == 7
 
 
 def test_login_returns_a_token_for_correct_credentials(db_session: Session) -> None:

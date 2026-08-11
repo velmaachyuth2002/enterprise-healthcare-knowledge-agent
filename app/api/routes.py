@@ -8,6 +8,7 @@ from groq import Groq
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
+from app.api.deps import get_current_user
 from app.core.config import get_settings
 from app.database.session import get_db
 from app.graph.agent_graph import build_graph
@@ -96,6 +97,13 @@ def get_agent_graph(
 
 
 @router.post("/ask", response_model=AskResponse)
-def ask(request: AskRequest, graph=Depends(get_agent_graph)) -> AskResponse:
-    result = graph.invoke({"question": request.question})
+def ask(
+    request: AskRequest,
+    current_user: User = Depends(get_current_user),
+    graph=Depends(get_agent_graph),
+) -> AskResponse:
+    # requester_id comes only from the verified token, never from the
+    # request body or anything the LLM parses - see EscalateTicketTool for
+    # why that boundary matters.
+    result = graph.invoke({"question": request.question, "requester_id": current_user.id})
     return AskResponse(answer=result["answer"])

@@ -36,6 +36,9 @@ _CLARIFY_MESSAGE = (
 
 class AgentState(TypedDict):
     question: str
+    # Set by the API layer from the authenticated JWT - never by the
+    # planner or anything parsed from the LLM's tool-call arguments.
+    requester_id: int | None
     decision: Decision | None
     blocked: bool | None
     planner_content: str | None
