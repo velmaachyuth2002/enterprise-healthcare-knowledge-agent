@@ -1,0 +1,23 @@
+services:
+  app:
+    build: .
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    environment:
+      # Overrides whatever's in .env: inside the compose network, the SMTP
+      # catcher is reached by service name, not localhost.
+      SMTP_HOST: smtp
+      SMTP_PORT: "1025"
+    depends_on:
+      - smtp
+
+  # Real SMTP receiving plus a web UI to see received mail - nicer for a
+  # docker-compose demo than tailing container logs. Only the web UI is
+  # published to the host; the app reaches SMTP directly over the
+  # compose network.
+  smtp:
+    image: axllent/mailpit
+    ports:
+      - "8025:8025"

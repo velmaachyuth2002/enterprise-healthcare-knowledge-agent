@@ -66,6 +66,7 @@ Every LLM call — the planner's tool-call decision and the RAG answer synthesis
 | Validation | Pydantic v2 | every tool input/output is a typed model, not a loose dict |
 | Testing | pytest | 89 tests, real fakes over mocks (including a real in-process SMTP server for email tests), live-API tests gated behind an env var |
 | Tooling | uv | dependency management and running |
+| Containerization | Docker Compose (app + Mailpit) | one command to run the whole thing, including a real SMTP catcher with a web UI |
 
 ## Getting started
 
@@ -102,6 +103,21 @@ curl -X POST http://127.0.0.1:8000/ask \
 
 Or open `http://127.0.0.1:8000/docs` for an interactive Swagger UI — click "Authorize" and log in there to try every endpoint interactively.
 
+### Running with Docker instead
+
+```bash
+cp .env.example .env   # set GROQ_API_KEY and JWT_SECRET, same as above
+
+docker compose up --build
+docker compose exec app uv run python -m scripts.seed_users
+```
+
+This brings up two containers: the app on `http://localhost:8000`, and [Mailpit](https://github.com/axllent/mailpit) - a real SMTP catcher with a web UI - at `http://localhost:8025`, so you can actually see the approval/confirmation emails land instead of tailing logs. The app talks to Mailpit over Docker's internal network automatically; nothing to configure.
+
+The embedding model is pre-downloaded at build time, so the container never needs network access just to start serving traffic. torch is pinned to the CPU-only build (`[tool.uv.sources]` in `pyproject.toml`) - nothing here uses a GPU, and the default resolution would otherwise pull several gigabytes of unused CUDA libraries.
+
+Data doesn't persist across `docker compose down` - each run starts from an empty database, the same way the manual walkthroughs in this README do. Adding a real volume is a small, separate change if you want it.
+
 ## Running tests
 
 ```bash
@@ -133,4 +149,4 @@ This was built incrementally, one justified component at a time, rather than sca
 - **Real email delivery.** `EmailService` speaks real SMTP, but points at a local dev catcher, not an actual provider (SES, SendGrid, etc.). Swapping one in is a config change behind the same `send()` call, not a new integration.
 - **Token revocation.** JWTs are stateless and short-lived (8h) with no server-side session/blacklist store - there's no way to invalidate a token before it expires.
 - **User provisioning UI.** Accounts are created by a seed script, not a sign-up flow or admin UI - matches how internal employees would actually be provisioned (by an admin), but there's no interface for it yet.
-- **Containerization.** No Dockerfile yet - `uv sync` + `uv run` is the whole local setup story for now.
+- **Persistent storage in Docker.** The containerized database is ephemeral by design for now (see above) - a production deployment would mount a real volume or point at a managed database instead.
