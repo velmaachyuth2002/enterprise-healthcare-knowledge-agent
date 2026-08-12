@@ -10,6 +10,16 @@ services:
       # catcher is reached by service name, not localhost.
       SMTP_HOST: smtp
       SMTP_PORT: "1025"
+      # Points SQLite at the mounted volume below instead of the plain
+      # local-dev default (sqlite:///./dev.db, inside the container's
+      # disposable filesystem) - four slashes because this is an absolute
+      # path, not a relative one.
+      DATABASE_URL: "sqlite:////app/data/dev.db"
+    volumes:
+      # Named volume, not a mount of /app itself - mounting /app would
+      # hide the application code COPYed in at build time. Survives
+      # `docker compose down`; only `docker compose down -v` removes it.
+      - db_data:/app/data
     depends_on:
       - smtp
 
@@ -21,3 +31,6 @@ services:
     image: axllent/mailpit
     ports:
       - "8025:8025"
+
+volumes:
+  db_data:

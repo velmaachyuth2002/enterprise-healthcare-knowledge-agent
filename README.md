@@ -116,7 +116,7 @@ This brings up two containers: the app on `http://localhost:8000`, and [Mailpit]
 
 The embedding model is pre-downloaded at build time, so the container never needs network access just to start serving traffic. torch is pinned to the CPU-only build (`[tool.uv.sources]` in `pyproject.toml`) - nothing here uses a GPU, and the default resolution would otherwise pull several gigabytes of unused CUDA libraries.
 
-Data doesn't persist across `docker compose down` - each run starts from an empty database, the same way the manual walkthroughs in this README do. Adding a real volume is a small, separate change if you want it.
+The database lives in a named Docker volume (`db_data`, mounted at `/app/data`), not the container's own disposable filesystem - so data survives `docker compose down` and rebuilds. To wipe it and start fresh, remove the volume explicitly: `docker compose down -v`.
 
 ## Running tests
 
@@ -149,4 +149,4 @@ This was built incrementally, one justified component at a time, rather than sca
 - **Real email delivery.** `EmailService` speaks real SMTP, but points at a local dev catcher, not an actual provider (SES, SendGrid, etc.). Swapping one in is a config change behind the same `send()` call, not a new integration.
 - **Token revocation.** JWTs are stateless and short-lived (8h) with no server-side session/blacklist store - there's no way to invalidate a token before it expires.
 - **User provisioning UI.** Accounts are created by a seed script, not a sign-up flow or admin UI - matches how internal employees would actually be provisioned (by an admin), but there's no interface for it yet.
-- **Persistent storage in Docker.** The containerized database is ephemeral by design for now (see above) - a production deployment would mount a real volume or point at a managed database instead.
+- **A production-grade database.** The Docker volume makes SQLite durable across restarts, but it's still SQLite, still single-node - a real deployment would point `DATABASE_URL` at a managed Postgres instance instead (the ORM layer is already Postgres-ready, this is a config change, not a rewrite).
