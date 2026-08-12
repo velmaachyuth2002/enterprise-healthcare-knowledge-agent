@@ -1,0 +1,29 @@
+name: Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    env:
+      # Fixed, non-secret value: only ever signs throwaway tokens created
+      # and verified within a single test run. Not a real deployment
+      # secret, so it doesn't need to live in GitHub's encrypted Secrets
+      # store - a real deployment would set its own JWT_SECRET in .env.
+      JWT_SECRET: ci-test-secret-not-used-for-anything-real
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Install dependencies
+        run: uv sync --locked
+
+      - name: Run tests
+        run: uv run pytest

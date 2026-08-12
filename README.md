@@ -1,5 +1,7 @@
 # Enterprise Healthcare Knowledge Agent
 
+[![Tests](https://github.com/velmaachyuth2002/enterprise-healthcare-knowledge-agent/actions/workflows/tests.yml/badge.svg)](https://github.com/velmaachyuth2002/enterprise-healthcare-knowledge-agent/actions/workflows/tests.yml)
+
 An internal AI agent for **MedFlow Health Systems** — a fictional B2B healthcare SaaS company — that lets employees ask natural-language questions and get answers grounded in real company documents and live ticket data, instead of digging through a wiki or a support dashboard.
 
 > MedFlow Health Systems, its policies, and its support tickets are entirely fictional, created for this project. No real patient data, PHI, or company information is used anywhere.
@@ -131,5 +133,4 @@ This was built incrementally, one justified component at a time, rather than sca
 - **Real email delivery.** `EmailService` speaks real SMTP, but points at a local dev catcher, not an actual provider (SES, SendGrid, etc.). Swapping one in is a config change behind the same `send()` call, not a new integration.
 - **Token revocation.** JWTs are stateless and short-lived (8h) with no server-side session/blacklist store - there's no way to invalidate a token before it expires.
 - **User provisioning UI.** Accounts are created by a seed script, not a sign-up flow or admin UI - matches how internal employees would actually be provisioned (by an admin), but there's no interface for it yet.
-- **CI.** Tests exist and run in seconds locally; they aren't yet wired into GitHub Actions.
 - **Containerization.** No Dockerfile yet - `uv sync` + `uv run` is the whole local setup story for now.
