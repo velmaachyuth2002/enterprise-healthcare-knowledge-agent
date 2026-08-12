@@ -82,17 +82,22 @@ cp .env.example .env
 # 3. Create the first manager/employee accounts (no self-service sign-up by design)
 uv run python -m scripts.seed_users
 
-# 4. Run a local SMTP catcher, in a separate terminal - no real provider or
+# 4. Optional - populate 100 realistic sample tickets, so ticket-count and
+#    unresolved-ticket questions have real, varied data to answer against
+#    instead of an empty database. Safe to re-run - skips if any exist.
+uv run python -m scripts.seed_tickets
+
+# 5. Run a local SMTP catcher, in a separate terminal - no real provider or
 #    credentials needed, this just prints received mail to the console.
 #    Port 2525, not the more common 1025: on macOS, 1025 is already bound
 #    by a system daemon (identityservicesd), which fails aiosmtpd's bind
 #    silently unless you go looking in its output for the error.
 uv run python -m aiosmtpd -n -l localhost:2525
 
-# 5. Run the server
+# 6. Run the server
 uv run uvicorn app.main:app --reload
 
-# 6. Try it - log in, then ask a question
+# 7. Try it - log in, then ask a question
 curl -X POST http://127.0.0.1:8000/login \
   -d "username=employee@medflow.example&password=employee-dev-pass"
 # copy the access_token from the response into $TOKEN below
@@ -110,6 +115,7 @@ cp .env.example .env   # set GROQ_API_KEY and JWT_SECRET, same as above
 
 docker compose up --build
 docker compose exec app uv run python -m scripts.seed_users
+docker compose exec app uv run python -m scripts.seed_tickets   # optional, sample data
 ```
 
 This brings up two containers: the app on `http://localhost:8000`, and [Mailpit](https://github.com/axllent/mailpit) - a real SMTP catcher with a web UI - at `http://localhost:8025`, so you can actually see the approval/confirmation emails land instead of tailing logs. The app talks to Mailpit over Docker's internal network automatically; nothing to configure.
@@ -138,7 +144,7 @@ app/
   services/  # LlmGateway, DocumentIndex, EmailService, auth (JWT/hashing), prompt-injection screening
   tools/     # DocumentSearchTool, SQL tools, EscalateTicketTool - what the planner can call
 documents/   # the markdown corpus DocumentSearchTool indexes
-scripts/     # seed_users.py - creates the first manager/employee accounts
+scripts/     # seed_users.py, seed_tickets.py - sample data for manual testing
 tests/
 ```
 
