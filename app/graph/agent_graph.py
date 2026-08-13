@@ -229,8 +229,16 @@ def build_graph(
         if isinstance(result, UnresolvedTicketsResult):
             if not result.tickets:
                 return {"answer": "There are no unresolved tickets."}
-            subjects = "; ".join(ticket.subject for ticket in result.tickets)
-            return {"answer": f"{len(result.tickets)} unresolved ticket(s): {subjects}"}
+            # One ticket per line, not semicolon-joined - the chat UI
+            # preserves newlines (white-space: pre-wrap), so this renders
+            # as a real list rather than a run-on sentence. Includes the
+            # ticket id (needed to actually reference one for escalation)
+            # and priority (previously invisible without opening a ticket).
+            lines = "\n".join(
+                f"#{ticket.id} [{ticket.priority.value}] {ticket.subject}"
+                for ticket in result.tickets
+            )
+            return {"answer": f"{len(result.tickets)} unresolved ticket(s):\n{lines}"}
 
         if isinstance(result, EscalateTicketResult):
             if not result.found:

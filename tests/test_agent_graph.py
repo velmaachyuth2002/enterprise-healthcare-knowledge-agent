@@ -254,14 +254,13 @@ def test_ticket_count_tool_call_decision_routes_to_ticket_count_tool(db_session:
 
 
 def test_unresolved_tool_call_decision_routes_to_unresolved_tool(db_session: Session) -> None:
-    db_session.add(
-        Ticket(
-            subject="Still open",
-            status=TicketStatus.OPEN,
-            priority=TicketPriority.HIGH,
-            created_at=datetime(2026, 7, 1),
-        )
+    ticket = Ticket(
+        subject="Still open",
+        status=TicketStatus.OPEN,
+        priority=TicketPriority.HIGH,
+        created_at=datetime(2026, 7, 1),
     )
+    db_session.add(ticket)
     db_session.commit()
 
     fake_document_search_tool = _RecordingFakeDocumentSearchTool(_UNUSED_DOCUMENT_RESULT)
@@ -281,7 +280,7 @@ def test_unresolved_tool_call_decision_routes_to_unresolved_tool(db_session: Ses
 
     result = graph.invoke({"question": "Generate a report of unresolved tickets."})
 
-    assert result["answer"] == "1 unresolved ticket(s): Still open"
+    assert result["answer"] == f"1 unresolved ticket(s):\n#{ticket.id} [high] Still open"
     assert fake_document_search_tool.called_with is None
     assert fake_count_tool.called_with is None
 
