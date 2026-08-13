@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>MedFlow Knowledge Agent</title>
+  <link rel="stylesheet" href="/style.css" />
+</head>
+<body>
+  <header id="app-header" hidden>
+    <span id="user-info"></span>
+    <button id="logout-button">Log out</button>
+  </header>
+
+  <main>
+    <section id="login-view">
+      <h1>MedFlow Knowledge Agent</h1>
+      <form id="login-form">
+        <label>
+          Email
+          <input type="email" id="login-email" required autocomplete="username" />
+        </label>
+        <label>
+          Password
+          <input type="password" id="login-password" required autocomplete="current-password" />
+        </label>
+        <button type="submit">Log in</button>
+        <p id="login-error" class="error" hidden></p>
+      </form>
+    </section>
+
+    <section id="employee-view" hidden>
+      <h1>Ask MedFlow</h1>
+      <div id="chat-log"></div>
+      <form id="chat-form">
+        <input
+          type="text"
+          id="chat-input"
+          placeholder="Ask a question, or ask to escalate a ticket..."
+          required
+          autocomplete="off"
+        />
+        <button type="submit">Send</button>
+      </form>
+    </section>
+
+    <section id="manager-view" hidden>
+      <h1>Pending Approvals</h1>
+      <div id="approvals-list"></div>
+      <p id="approvals-empty" hidden>No pending approvals.</p>
+    </section>
+  </main>
+
+  <script src="/app.js"></script>
+</body>
+</html>

@@ -249,3 +249,33 @@ def test_login_rejects_an_unknown_email(db_session: Session) -> None:
         app.dependency_overrides.clear()
 
     assert response.status_code == 401
+
+
+def test_me_returns_the_authenticated_users_info() -> None:
+    manager = User(
+        id=3, email="manager@medflow.example", name="Morgan Reyes", hashed_password="x",
+        role=UserRole.MANAGER,
+    )
+    app.dependency_overrides[get_current_user] = _authenticate_as(manager)
+    client = TestClient(app)
+
+    try:
+        response = client.get("/me")
+    finally:
+        app.dependency_overrides.clear()
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "id": 3,
+        "email": "manager@medflow.example",
+        "name": "Morgan Reyes",
+        "role": "manager",
+    }
+
+
+def test_me_requires_authentication() -> None:
+    client = TestClient(app)
+
+    response = client.get("/me")
+
+    assert response.status_code == 401

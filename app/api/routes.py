@@ -5,7 +5,7 @@ from pathlib import Path
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordRequestForm
 from groq import Groq
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_user, get_email_service
@@ -35,6 +35,23 @@ class AskResponse(BaseModel):
 class TokenResponse(BaseModel):
     access_token: str
     token_type: str = "bearer"
+
+
+class UserResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    email: str
+    name: str
+    role: UserRole
+
+
+@router.get("/me", response_model=UserResponse)
+def me(current_user: User = Depends(get_current_user)) -> UserResponse:
+    # The only thing a token proves is *which user* - it doesn't carry role
+    # or name, so the frontend needs a real call to know who's logged in
+    # and which view (employee chat vs. manager approvals) to show.
+    return UserResponse.model_validate(current_user)
 
 
 @router.post("/login", response_model=TokenResponse)
