@@ -7,6 +7,15 @@ from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 
 from app.database.session import Base
+
+# Imported for their side effect - registering each table on Base.metadata
+# - not for the names themselves. A SQLAlchemy model only gets registered
+# when its module is actually imported somewhere; db_session's create_all()
+# below has always relied on *some* test file happening to import every
+# model first. That's fragile: it only worked because pytest collects the
+# whole tests/ directory by default, and broke the moment a new test file
+# was run in isolation without importing the models it needed transitively.
+from app.models import approval_request, llm_usage, ticket, user  # noqa: F401
 from app.services.document_index import DocumentIndex
 
 _DOCUMENTS_DIR = Path(__file__).resolve().parent.parent / "documents"
