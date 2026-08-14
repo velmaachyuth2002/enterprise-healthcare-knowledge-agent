@@ -19,6 +19,11 @@ class Settings(BaseSettings):
     # bind with no obvious error unless you go looking for it.
     smtp_port: int = 2525
     smtp_from_address: str = "noreply@medflow.example"
+    # A separate SQLite file, not reusing database_url's - LangGraph's
+    # checkpointer manages its own schema independently of our own
+    # SQLAlchemy tables. Overridden in Docker to live in the same mounted
+    # volume as dev.db, so conversation history persists the same way.
+    checkpoint_db_path: str = "checkpoints.db"
 
 
 @lru_cache

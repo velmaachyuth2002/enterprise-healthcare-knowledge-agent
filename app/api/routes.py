@@ -1,10 +1,13 @@
+import sqlite3
 from datetime import UTC, datetime
 from functools import lru_cache
 from pathlib import Path
+from uuid import uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordRequestForm
 from groq import Groq
+from langgraph.checkpoint.sqlite import SqliteSaver
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.orm import Session
 
@@ -26,10 +29,15 @@ router = APIRouter()
 
 class AskRequest(BaseModel):
     question: str = Field(min_length=1)
+    # Client-generated (a fresh conversation gets a fresh id); omitted on
+    # the very first message of a conversation, in which case one is
+    # generated here and returned so the client can reuse it afterward.
+    conversation_id: str | None = None
 
 
 class AskResponse(BaseModel):
     answer: str
+    conversation_id: str
 
 
 class TokenResponse(BaseModel):
@@ -97,11 +105,27 @@ def get_document_search_tool() -> DocumentSearchTool:
     return DocumentSearchTool(DocumentIndex(Path(settings.documents_dir)))
 
 
+@lru_cache
+def get_checkpointer() -> SqliteSaver:
+    # Cached: one long-lived connection for the process lifetime, same
+    # reasoning as get_document_search_tool - conversation history isn't a
+    # per-request resource. A separate SQLite file from the main database -
+    # LangGraph manages its own schema independently of our SQLAlchemy
+    # tables - but overridden in Docker to live in the same mounted volume
+    # as dev.db, so it persists the same way.
+    settings = get_settings()
+    conn = sqlite3.connect(settings.checkpoint_db_path, check_same_thread=False)
+    checkpointer = SqliteSaver(conn)
+    checkpointer.setup()
+    return checkpointer
+
+
 def get_agent_graph(
     session: Session = Depends(get_db),
     client: Groq = Depends(get_groq_client),
     document_search_tool: DocumentSearchTool = Depends(get_document_search_tool),
     email_service: EmailService = Depends(get_email_service),
+    checkpointer: SqliteSaver = Depends(get_checkpointer),
 ):
     # Not cached: most of these tools, and the gateway itself, hold a
     # per-request Session that get_db() closes at the end of this request,
@@ -122,6 +146,7 @@ def get_agent_graph(
         email_service,
         get_manager_emails,
         gateway,
+        checkpointer=checkpointer,
     )
 
 
@@ -131,8 +156,17 @@ def ask(
     current_user: User = Depends(get_current_user),
     graph=Depends(get_agent_graph),
 ) -> AskResponse:
+    conversation_id = request.conversation_id or str(uuid4())
+    # Namespaced by user, not just the client-supplied id: prevents one
+    # user from ever reading or continuing another user's conversation,
+    # even by coincidence or by deliberately guessing/reusing an id.
+    thread_id = f"{current_user.id}:{conversation_id}"
+
     # requester_id comes only from the verified token, never from the
     # request body or anything the LLM parses - see EscalateTicketTool for
     # why that boundary matters.
-    result = graph.invoke({"question": request.question, "requester_id": current_user.id})
-    return AskResponse(answer=result["answer"])
+    result = graph.invoke(
+        {"question": request.question, "requester_id": current_user.id},
+        config={"configurable": {"thread_id": thread_id}},
+    )
+    return AskResponse(answer=result["answer"], conversation_id=conversation_id)

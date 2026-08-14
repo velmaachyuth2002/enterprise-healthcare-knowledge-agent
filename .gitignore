@@ -9,8 +9,11 @@ wheels/
 # Virtual environments
 .venv
 
-# Local SQLite database
+# Local SQLite database (including WAL-mode sidecar files, which *.db alone
+# doesn't match - SqliteSaver's checkpoint DB uses WAL mode)
 *.db
+*.db-shm
+*.db-wal
 
 # Environment variables
 .env

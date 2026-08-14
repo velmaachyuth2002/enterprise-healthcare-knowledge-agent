@@ -5,6 +5,8 @@ __pycache__/
 **/__pycache__/
 *.pyc
 .pytest_cache/
-dev.db
+*.db
+*.db-shm
+*.db-wal
 .env
 tests/

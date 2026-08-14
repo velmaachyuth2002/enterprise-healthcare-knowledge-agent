@@ -22,9 +22,11 @@ _FAKE_AUTHENTICATED_USER = User(
 class _FakeGraph:
     def __init__(self) -> None:
         self.invoked_with: dict | None = None
+        self.invoked_config: dict | None = None
 
-    def invoke(self, state: dict) -> dict:
+    def invoke(self, state: dict, config: dict | None = None) -> dict:
         self.invoked_with = state
+        self.invoked_config = config
         return {"answer": f"stub answer for: {state['question']}"}
 
 
@@ -163,6 +165,42 @@ def test_ask_requires_authentication() -> None:
     response = client.post("/ask", json={"question": "anything"})
 
     assert response.status_code == 401
+
+
+def test_ask_generates_a_conversation_id_when_none_is_provided() -> None:
+    app.dependency_overrides[get_agent_graph] = lambda: _FakeGraph()
+    app.dependency_overrides[get_current_user] = _authenticate_as()
+    client = TestClient(app)
+
+    try:
+        response = client.post("/ask", json={"question": "anything"})
+    finally:
+        app.dependency_overrides.clear()
+
+    conversation_id = response.json()["conversation_id"]
+    assert len(conversation_id) > 0
+
+
+def test_ask_echoes_back_a_provided_conversation_id() -> None:
+    fake_graph = _FakeGraph()
+    app.dependency_overrides[get_agent_graph] = lambda: fake_graph
+    app.dependency_overrides[get_current_user] = _authenticate_as()
+    client = TestClient(app)
+
+    try:
+        response = client.post(
+            "/ask", json={"question": "anything", "conversation_id": "existing-conversation"}
+        )
+    finally:
+        app.dependency_overrides.clear()
+
+    assert response.json()["conversation_id"] == "existing-conversation"
+    # Namespaced by user before being used as the actual LangGraph thread
+    # id - a client-supplied id alone must never be enough to reach
+    # another user's conversation.
+    assert fake_graph.invoked_config == {
+        "configurable": {"thread_id": f"{_FAKE_AUTHENTICATED_USER.id}:existing-conversation"}
+    }
 
 
 def test_ask_passes_the_authenticated_users_id_into_the_graph() -> None:

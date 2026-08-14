@@ -1,5 +1,11 @@
 const TOKEN_KEY = "medflow_token";
 
+// null means "no conversation started yet" - the backend generates one on
+// the first /ask call and this picks it up from the response. Reset
+// whenever the employee view (re)opens, so each visit is a fresh
+// conversation (no "past conversations" list exists yet).
+let conversationId = null;
+
 function getToken() {
   return localStorage.getItem(TOKEN_KEY);
 }
@@ -42,6 +48,7 @@ function showEmployeeView(user) {
   document.getElementById("login-view").hidden = true;
   document.getElementById("employee-view").hidden = false;
   document.getElementById("manager-view").hidden = true;
+  conversationId = null;
 }
 
 function showManagerView(user) {
@@ -111,6 +118,7 @@ document.getElementById("login-form").addEventListener("submit", async (event) =
 
 document.getElementById("logout-button").addEventListener("click", () => {
   clearToken();
+  conversationId = null;
   document.getElementById("chat-log").innerHTML = "";
   showLoginView();
 });
@@ -140,7 +148,7 @@ document.getElementById("chat-form").addEventListener("submit", async (event) =>
   const response = await apiFetch("/ask", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ question }),
+    body: JSON.stringify({ question, conversation_id: conversationId }),
   });
   pending.remove();
 
@@ -151,6 +159,7 @@ document.getElementById("chat-form").addEventListener("submit", async (event) =>
     return;
   }
   const data = await response.json();
+  conversationId = data.conversation_id;
   appendMessage(data.answer, "agent");
 });
 

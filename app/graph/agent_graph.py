@@ -2,6 +2,7 @@ from collections.abc import Callable
 from datetime import date
 from typing import Literal, TypedDict
 
+from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.graph import END, START, StateGraph
 from pydantic import ValidationError
 
@@ -42,6 +43,25 @@ _CLARIFY_MESSAGE = (
     "I understood what you wanted, but couldn't quite parse the details - could you rephrase?"
 )
 
+_HISTORY_LIMIT = 3
+
+# Every _planner return must include this, merged with whatever this turn
+# actually sets. Without it, a field set on a *previous* turn of the same
+# conversation (persisted by the checkpointer) would silently leak into
+# this turn's decision-making - LangGraph only overwrites the specific
+# keys a node's return dict includes, it doesn't reset the rest.
+_SCRATCH_DEFAULTS: dict[str, object] = {
+    "blocked": None,
+    "planner_content": None,
+    "query": None,
+    "count_range_start": None,
+    "count_range_end": None,
+    "ticket_id": None,
+    "priority": None,
+    "reason": None,
+    "tool_result": None,
+}
+
 
 class AgentState(TypedDict):
     question: str
@@ -59,6 +79,11 @@ class AgentState(TypedDict):
     reason: str | None
     tool_result: ToolResult | None
     answer: str | None
+    # Persists across turns *only* when the graph is compiled with a
+    # checkpointer and invoked with the same thread_id - a bounded
+    # transcript of recent Q&A pairs, so follow-ups ("escalate that one",
+    # "what about last month instead") can be resolved by the planner.
+    history: list[dict[str, str]] | None
 
 
 def _route_after_planner(state: AgentState) -> Decision:
@@ -71,6 +96,13 @@ def _format_context(chunks: list[ScoredChunk]) -> str:
     return "\n\n".join(f"[{chunk.source} — {chunk.heading}]\n{chunk.content}" for chunk in chunks)
 
 
+def _format_history(history: list[dict[str, str]] | None) -> str:
+    if not history:
+        return ""
+    turns = "\n".join(f"Q: {turn['question']}\nA: {turn['answer']}" for turn in history)
+    return f"Recent conversation, for resolving follow-ups like \"that one\":\n{turns}\n\n"
+
+
 def build_graph(
     document_search_tool: DocumentSearchTool,
     ticket_count_tool: TicketCountTool,
@@ -80,6 +112,7 @@ def build_graph(
     get_manager_emails: Callable[[], list[str]],
     gateway: LlmGateway,
     today: Callable[[], date] = date.today,
+    checkpointer: BaseCheckpointSaver | None = None,
 ):
     # Built once, not per-invocation.
     tool_specs = [
@@ -109,40 +142,65 @@ def build_graph(
         # `today()` is injected (not date.today() called directly) for two
         # reasons: testability, and because the model has no built-in
         # notion of the current date - without this, relative expressions
-        # like "last month" have no principled way to resolve.
-        question = f"Today's date is {today().isoformat()}. {state['question']}"
+        # like "last month" have no principled way to resolve. History is
+        # folded into this same plain string rather than sent as separate
+        # messages - it's the same trick as the date injection, and it
+        # means LlmGateway's tested interface never has to change.
+        question = (
+            f"Today's date is {today().isoformat()}. "
+            f"{_format_history(state.get('history'))}"
+            f"Current question: {state['question']}"
+        )
         decision = gateway.decide_tool_call(question, tool_specs)
 
         if decision.blocked:
-            return {"decision": "respond", "blocked": True}
+            return {**_SCRATCH_DEFAULTS, "decision": "respond", "blocked": True}
 
         if decision.tool_name == document_search_tool.name:
             try:
                 args = DocumentSearchInput.model_validate(decision.arguments)
             except ValidationError:
-                return {"decision": "respond", "planner_content": _CLARIFY_MESSAGE}
-            return {"decision": "call_document_search_tool", "query": args.query}
+                return {
+                    **_SCRATCH_DEFAULTS,
+                    "decision": "respond",
+                    "planner_content": _CLARIFY_MESSAGE,
+                }
+            return {
+                **_SCRATCH_DEFAULTS,
+                "decision": "call_document_search_tool",
+                "query": args.query,
+            }
 
         if decision.tool_name == ticket_count_tool.name:
             try:
                 args = TicketCountInput.model_validate(decision.arguments)
             except ValidationError:
-                return {"decision": "respond", "planner_content": _CLARIFY_MESSAGE}
+                return {
+                    **_SCRATCH_DEFAULTS,
+                    "decision": "respond",
+                    "planner_content": _CLARIFY_MESSAGE,
+                }
             return {
+                **_SCRATCH_DEFAULTS,
                 "decision": "call_ticket_count_tool",
                 "count_range_start": args.start,
                 "count_range_end": args.end,
             }
 
         if decision.tool_name == unresolved_tickets_tool.name:
-            return {"decision": "call_unresolved_tickets_tool"}
+            return {**_SCRATCH_DEFAULTS, "decision": "call_unresolved_tickets_tool"}
 
         if decision.tool_name == escalate_ticket_tool.name:
             try:
                 args = EscalateTicketInput.model_validate(decision.arguments)
             except ValidationError:
-                return {"decision": "respond", "planner_content": _CLARIFY_MESSAGE}
+                return {
+                    **_SCRATCH_DEFAULTS,
+                    "decision": "respond",
+                    "planner_content": _CLARIFY_MESSAGE,
+                }
             return {
+                **_SCRATCH_DEFAULTS,
                 "decision": "call_escalate_ticket_tool",
                 "ticket_id": args.ticket_id,
                 "priority": args.priority,
@@ -153,7 +211,7 @@ def build_graph(
         # or names a tool that doesn't exist (hallucinated) - both are
         # handled the same way: nothing to execute, fall back to whatever
         # plain-text reply the model gave.
-        return {"decision": "respond", "planner_content": decision.content}
+        return {**_SCRATCH_DEFAULTS, "decision": "respond", "planner_content": decision.content}
 
     def _call_document_search_tool(state: AgentState) -> dict[str, DocumentSearchResult]:
         # `_planner` only routes here when it has also set `query`.
@@ -202,33 +260,33 @@ def build_graph(
                 )
         return {"tool_result": result}
 
-    def _respond(state: AgentState) -> dict[str, str]:
+    def _compute_answer(state: AgentState) -> str:
         if state.get("blocked"):
-            return {"answer": "I can't help with that request."}
+            return "I can't help with that request."
 
         result = state.get("tool_result")
         if result is None:
             planner_content = state.get("planner_content")
             if planner_content:
-                return {"answer": planner_content}
-            return {"answer": "I don't have a way to answer that yet."}
+                return planner_content
+            return "I don't have a way to answer that yet."
 
         if isinstance(result, DocumentSearchResult):
             if not result.found:
-                return {"answer": "I couldn't find anything relevant in our documents."}
+                return "I couldn't find anything relevant in our documents."
             synthesized = gateway.answer_from_context(
                 state["question"], _format_context(result.chunks)
             )
             if synthesized.blocked:
-                return {"answer": "I can't help with that request."}
-            return {"answer": f"{synthesized.text}\n\n(Source: {result.chunks[0].source})"}
+                return "I can't help with that request."
+            return f"{synthesized.text}\n\n(Source: {result.chunks[0].source})"
 
         if isinstance(result, TicketCountResult):
-            return {"answer": f"{result.count} ticket(s) were opened in that period."}
+            return f"{result.count} ticket(s) were opened in that period."
 
         if isinstance(result, UnresolvedTicketsResult):
             if not result.tickets:
-                return {"answer": "There are no unresolved tickets."}
+                return "There are no unresolved tickets."
             # One ticket per line, not semicolon-joined - the chat UI
             # preserves newlines (white-space: pre-wrap), so this renders
             # as a real list rather than a run-on sentence. Includes the
@@ -238,19 +296,17 @@ def build_graph(
                 f"#{ticket.id} [{ticket.priority.value}] {ticket.subject}"
                 for ticket in result.tickets
             )
-            return {"answer": f"{len(result.tickets)} unresolved ticket(s):\n{lines}"}
+            return f"{len(result.tickets)} unresolved ticket(s):\n{lines}"
 
         if isinstance(result, EscalateTicketResult):
             if not result.found:
-                return {"answer": f"I couldn't find ticket #{state['ticket_id']}."}
-            return {
-                "answer": (
-                    f"I've proposed escalating ticket #{result.ticket_id} to "
-                    f"{result.requested_priority.value} priority. This requires manager "
-                    f"approval before it takes effect "
-                    f"(request #{result.approval_request_id})."
-                )
-            }
+                return f"I couldn't find ticket #{state['ticket_id']}."
+            return (
+                f"I've proposed escalating ticket #{result.ticket_id} to "
+                f"{result.requested_priority.value} priority. This requires manager "
+                f"approval before it takes effect "
+                f"(request #{result.approval_request_id})."
+            )
 
         # Not a defensive no-op: unlike the state-field guarantees above
         # (which our own control flow makes provably true), "every
@@ -259,6 +315,12 @@ def build_graph(
         # loudly at the gap instead of a KeyError three layers away when
         # `answer` turns out unset.
         raise AssertionError(f"unhandled tool result type: {type(result)}")
+
+    def _respond(state: AgentState) -> dict[str, object]:
+        answer = _compute_answer(state)
+        turn = {"question": state["question"], "answer": answer}
+        history = [*(state.get("history") or []), turn][-_HISTORY_LIMIT:]
+        return {"answer": answer, "history": history}
 
     graph = StateGraph(AgentState)
     graph.add_node("planner", _planner)
@@ -286,4 +348,4 @@ def build_graph(
     graph.add_edge("call_escalate_ticket_tool", "respond")
     graph.add_edge("respond", END)
 
-    return graph.compile()
+    return graph.compile(checkpointer=checkpointer)

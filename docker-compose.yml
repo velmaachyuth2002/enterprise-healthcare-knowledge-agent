@@ -15,6 +15,9 @@ services:
       # disposable filesystem) - four slashes because this is an absolute
       # path, not a relative one.
       DATABASE_URL: "sqlite:////app/data/dev.db"
+      # Same reasoning: conversation-history checkpoints live in the
+      # mounted volume too, not the container's disposable filesystem.
+      CHECKPOINT_DB_PATH: "/app/data/checkpoints.db"
     volumes:
       # Named volume, not a mount of /app itself - mounting /app would
       # hide the application code COPYed in at build time. Survives
