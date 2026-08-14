@@ -11,6 +11,7 @@ RUN uv sync --frozen --no-dev
 COPY app/ ./app/
 COPY documents/ ./documents/
 COPY scripts/ ./scripts/
+COPY web/ ./web/
 
 # Pre-download the embedding model at build time rather than on first
 # request, so the container never needs network access just to start
